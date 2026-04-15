@@ -54,18 +54,11 @@
         .sync-badge { font-size: 0.8rem; padding: 4px 8px; border-radius: 12px; font-weight: bold; }
         .sync-offline { background: #fee2e2; color: #dc2626; }
         .sync-online { background: #d1fae5; color: #059669; }
-        .local-warning { background: var(--danger); color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: bold; display: none; text-align: center;}
     </style>
 </head>
 <body>
 
 <div class="container">
-    <!-- LOCAL WARNING -->
-    <div id="localWarning" class="local-warning">
-        ⚠️ AUTO-SYNC DISABLED ⚠️<br>
-        <span style="font-size: 0.9rem; font-weight: normal;">You opened this app from a local file folder. Apple and Android block syncing from files. Please upload this file to a free web host (like tiiny.host) to enable Auto-Sync.</span>
-    </div>
-
     <!-- ADD EXPENSE -->
     <div class="card">
         <h2>Add Expense <span id="syncIndicator" class="sync-badge sync-offline">🔴 Offline</span></h2>
@@ -90,7 +83,7 @@
 
     <!-- ANALYTICS -->
     <div class="card">
-        <h2>Analytics <button class="secondary" style="padding: 5px 10px; font-size: 0.8rem;" onclick="toggleSettings()">⚙️ Sync Settings</button></h2>
+        <h2>Analytics <button class="secondary" style="padding: 5px 10px; font-size: 0.8rem;" onclick="toggleSettings()">⚙️ App Settings</button></h2>
         <div class="tabs">
             <div class="tab active" onclick="setChartType('time', this)">Time</div>
             <div class="tab" onclick="setChartType('category', this)">Category</div>
@@ -110,13 +103,13 @@
         <div class="cloud-box">
             <h3 style="margin-top:0;">🔄 Auto-Sync Devices</h3>
             <p style="font-size: 0.85rem; color: #4b5563;">Generate a code on your main device, then enter it on your other devices. They will sync automatically in the background!</p>
-            <p style="font-weight: bold;">Your Sync Code: <br><span id="syncCodeDisplay" style="color: var(--primary); word-break: break-all;">None</span></p>
+            <p style="font-size: 1.1rem; font-weight: bold;">Your Sync Code: <br><span id="syncCodeDisplay" style="color: var(--primary); letter-spacing: 1px;">None</span></p>
             
             <div class="input-group">
                 <input type="text" id="syncInput" placeholder="Paste code here...">
                 <button onclick="linkDevice()" style="flex: 1;" id="linkBtn">Link</button>
             </div>
-            <button class="secondary" onclick="generateCode()" id="genBtn" style="margin-top: 5px;">Generate New Code</button>
+            <button class="secondary" onclick="generateCode()" id="genBtn" style="margin-top: 5px;">Generate New Sync Code</button>
         </div>
 
         <h3>Manage Categories & Methods</h3>
@@ -142,7 +135,7 @@
         methods: JSON.parse(localStorage.getItem('methods')) || ['DBS PayNow', 'Credit Card', 'Cash']
     };
     
-    let syncData = JSON.parse(localStorage.getItem('syncData')) || null; // Stores { id, token }
+    let syncId = localStorage.getItem('syncId') || null; 
     let chartInstance = null;
     let currentChartType = 'time'; 
     let currentTimeframe = 'daily';
@@ -150,14 +143,10 @@
 
     // --- INIT ---
     function init() {
-        if (window.location.protocol === 'file:') {
-            document.getElementById('localWarning').style.display = 'block';
-        }
-
         document.getElementById('dateInput').value = getLocalToday();
         refreshUI();
 
-        if (syncData && syncData.id) {
+        if (syncId) {
             startAutoSync();
         }
     }
@@ -171,8 +160,8 @@
         document.getElementById('category').innerHTML = localData.categories.map(c => `<option value="${c}">${c}</option>`).join('');
         document.getElementById('method').innerHTML = localData.methods.map(m => `<option value="${m}">${m}</option>`).join('');
         
-        if (syncData) {
-            document.getElementById('syncCodeDisplay').innerText = `${syncData.id}-${syncData.token}`;
+        if (syncId) {
+            document.getElementById('syncCodeDisplay').innerText = syncId;
             document.getElementById('syncIndicator').className = "sync-badge sync-online";
             document.getElementById('syncIndicator').innerText = "🟢 Live Syncing";
         }
@@ -181,7 +170,7 @@
         renderChart();
     }
 
-    // --- EXPENSE LOGIC (WITH CLOUD TRUTH) ---
+    // --- EXPENSE LOGIC ---
     async function addExpense() {
         const amount = parseFloat(document.getElementById('amount').value);
         const date = document.getElementById('dateInput').value;
@@ -200,22 +189,19 @@
         btn.disabled = true;
         btn.innerText = "Syncing...";
 
-        // If online, fetch absolute latest first, append, then push
-        if (syncData) {
+        if (syncId) {
             try {
-                const cloudRes = await fetch(`https://api.myjson.online/v1/records/${syncData.id}`);
+                // Fetch absolute latest to prevent overwriting other device's quick inputs
+                const cloudRes = await fetch(`https://kvdb.io/${syncId}/data`);
                 if (cloudRes.ok) {
                     const cloudJSON = await cloudRes.json();
-                    if (cloudJSON.data && cloudJSON.data.expenses) {
-                        localData = cloudJSON.data; // Sync to current cloud
-                    }
+                    if (cloudJSON && cloudJSON.expenses) localData = cloudJSON;
                 }
                 
                 localData.expenses.push(expense);
                 await pushToCloud();
-                
             } catch (e) {
-                // If offline, just save locally
+                // Fallback offline save
                 localData.expenses.push(expense);
             }
         } else {
@@ -236,14 +222,13 @@
         saveLocally();
         refreshUI();
 
-        if (syncData) {
+        if (syncId) {
             try {
-                // Fetch latest, remove the item, push back
-                const cloudRes = await fetch(`https://api.myjson.online/v1/records/${syncData.id}`);
+                const cloudRes = await fetch(`https://kvdb.io/${syncId}/data`);
                 if (cloudRes.ok) {
                     const cloudJSON = await cloudRes.json();
-                    cloudJSON.data.expenses = cloudJSON.data.expenses.filter(e => e.id !== id);
-                    localData.expenses = cloudJSON.data.expenses;
+                    cloudJSON.expenses = cloudJSON.expenses.filter(e => e.id !== id);
+                    localData.expenses = cloudJSON.expenses;
                     await pushToCloud();
                 }
             } catch (e) { console.log("Failed to sync deletion instantly"); }
@@ -256,12 +241,12 @@
         localStorage.setItem('methods', JSON.stringify(localData.methods));
     }
 
-    // --- AUTO-SYNC MAGIC (MyJSON Online API) ---
+    // --- AUTO-SYNC MAGIC (KVDB.io) ---
     async function pushToCloud() {
-        await fetch(`https://api.myjson.online/v1/records/${syncData.id}`, {
+        await fetch(`https://kvdb.io/${syncId}/data`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json', 'x-collection-access-token': syncData.token },
-            body: JSON.stringify({ data: localData })
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(localData)
         });
     }
 
@@ -269,23 +254,22 @@
         if(isPolling) return;
         isPolling = true;
         
-        // Poll the database every 4 seconds silently in the background
+        // Poll the database every 4 seconds silently
         setInterval(async () => {
-            if(!syncData) return;
+            if(!syncId) return;
             try {
-                const res = await fetch(`https://api.myjson.online/v1/records/${syncData.id}`);
+                const res = await fetch(`https://kvdb.io/${syncId}/data`);
                 if (res.ok) {
                     const cloudData = await res.json();
                     
-                    // If the cloud has different data, update the UI automatically
-                    if (JSON.stringify(cloudData.data) !== JSON.stringify(localData)) {
-                        localData = cloudData.data;
+                    if (JSON.stringify(cloudData) !== JSON.stringify(localData)) {
+                        localData = cloudData;
                         saveLocally();
                         refreshUI();
                     }
                 }
             } catch (e) {
-                // Network silently failed
+                // Ignore silent background network errors
             }
         }, 4000);
     }
@@ -296,47 +280,46 @@
         btn.disabled = true;
 
         try {
-            const res = await fetch('https://api.myjson.online/v1/records', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ data: localData })
-            });
-            const result = await res.json();
+            // Generate unique bucket ID
+            const res = await fetch('https://kvdb.io/', { method: 'POST' });
+            if (!res.ok) throw new Error();
             
-            syncData = { id: result.id, token: result.token };
-            localStorage.setItem('syncData', JSON.stringify(syncData));
+            const newId = (await res.text()).trim();
+            syncId = newId;
+            localStorage.setItem('syncId', syncId);
+            
+            // Push initial data to new bucket
+            await pushToCloud();
             
             startAutoSync();
             refreshUI();
-            alert("Code Generated! Copy the code shown in the Settings menu and paste it on your other device.");
+            alert("Code Generated!\n\nCopy the code shown in the Settings menu and paste it on your other device.");
         } catch (e) {
             alert("Network Error. Cannot generate code.");
         }
-        btn.innerText = "Generate New Code";
+        btn.innerText = "Generate New Sync Code";
         btn.disabled = false;
     }
 
     async function linkDevice() {
         const input = document.getElementById('syncInput').value.trim();
-        if(!input || !input.includes('-')) return alert("Please enter a valid code format (e.g., xxxxx-yyyyy)");
+        if(!input) return alert("Please enter a code");
         
         const btn = document.getElementById('linkBtn');
         btn.innerText = "Linking...";
         btn.disabled = true;
 
-        const parts = input.split('-');
-        const tempId = parts[0];
-        const tempToken = parts[1];
-
         try {
-            const res = await fetch(`https://api.myjson.online/v1/records/${tempId}`);
+            const res = await fetch(`https://kvdb.io/${input}/data`);
             if (!res.ok) throw new Error("Invalid Code");
             
             const cloudData = await res.json();
-            localData = cloudData.data; // Overwrite local with cloud data
+            if(cloudData && cloudData.expenses) {
+                localData = cloudData;
+            }
             
-            syncData = { id: tempId, token: tempToken };
-            localStorage.setItem('syncData', JSON.stringify(syncData));
+            syncId = input;
+            localStorage.setItem('syncId', syncId);
             
             saveLocally();
             startAutoSync();
@@ -344,7 +327,8 @@
             document.getElementById('syncInput').value = '';
             alert("🎉 Devices Successfully Linked! They are now syncing automatically.");
         } catch (e) {
-            alert("Invalid Code or Network Error.");
+            alert("Invalid Code or Network Error. Make sure you pasted it correctly.");
+            document.getElementById('syncInput').value = '';
         }
         
         btn.innerText = "Link";
@@ -469,7 +453,7 @@
         document.getElementById(inputId).value = '';
         saveLocally();
         refreshUI();
-        if(syncData) await pushToCloud();
+        if(syncId) await pushToCloud();
     }
 
     function toggleSettings() { document.getElementById('settingsPanel').classList.toggle('active'); }
