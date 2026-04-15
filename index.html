@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Simple Expense Tracker</title>
+    <!-- Makes it look like a native app on phones -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
+    
+    <style>
+        :root { --primary: #2563eb; --bg: #f3f4f6; --card: #ffffff; --text: #1f2937; --border: #e5e7eb; --danger: #ef4444; --success: #10b981;}
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: var(--bg); color: var(--text); margin: 0; padding: 10px; display: flex; flex-direction: column; align-items: center; }
+        .container { width: 100%; max-width: 600px; padding-bottom: 30px;}
+        .card { background: var(--card); border-radius: 12px; padding: 20px; margin-bottom: 15px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+        h2 { margin-top: 0; font-size: 1.2rem; display: flex; justify-content: space-between; align-items: center; }
+        
+        /* Inputs */
+        .input-group { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+        input, select, button { padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 16px; box-sizing: border-box;}
+        input[type="number"], input[type="text"] { flex: 1; min-width: 100px; font-weight: bold; }
+        input[type="date"] { flex: 1; min-width: 130px; }
+        select { flex: 1; min-width: 120px; background: white; }
+        button { background-color: var(--primary); color: white; border: none; cursor: pointer; font-weight: bold; width: 100%; transition: 0.2s; }
+        button:active { transform: scale(0.98); }
+        button:disabled { background-color: #9ca3af; cursor: not-allowed; }
+        button.secondary { background-color: #6b7280; width: auto; }
+        button.danger-text { background: transparent; color: var(--danger); width: auto; padding: 5px; font-size: 1.2rem;}
+
+        /* Dashboard */
+        .daily-total { font-size: 2.2rem; font-weight: bold; color: var(--primary); text-align: center; margin: 10px 0; }
+        .expense-list { list-style: none; padding: 0; margin: 0; max-height: 250px; overflow-y: auto; }
+        .expense-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+        .expense-item:last-child { border-bottom: none; }
+        .expense-details span { display: block; font-size: 0.8rem; color: #6b7280; margin-top: 3px;}
+        .expense-amount { font-weight: bold; font-size: 1.1rem; margin-right: 10px;}
+        .expense-right { display: flex; align-items: center; }
+
+        /* Tabs & Charts */
+        .tabs { display: flex; gap: 5px; margin-bottom: 15px; }
+        .tab { flex: 1; padding: 8px; text-align: center; background: var(--border); border-radius: 6px; cursor: pointer; font-size: 0.9rem; }
+        .tab.active { background: var(--primary); color: white; }
+        .chart-container { position: relative; height: 250px; width: 100%; }
+        
+        /* Settings & Sync */
+        .settings { display: none; }
+        .settings.active { display: block; }
+        .cloud-box { background: #eff6ff; border: 1px solid #bfdbfe; padding: 15px; border-radius: 8px; margin-bottom: 15px;}
+        
+        /* Badges */
+        .sync-badge { font-size: 0.8rem; padding: 4px 8px; border-radius: 12px; font-weight: bold; }
+        .sync-offline { background: #fee2e2; color: #dc2626; }
+        .sync-online { background: #d1fae5; color: #059669; }
+        .local-warning { background: var(--danger); color: white; padding: 15px; border-radius: 8px; margin-bottom: 15px; font-weight: bold; display: none; text-align: center;}
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <!-- LOCAL WARNING -->
+    <div id="localWarning" class="local-warning">
+        ⚠️ AUTO-SYNC DISABLED ⚠️<br>
+        <span style="font-size: 0.9rem; font-weight: normal;">You opened this app from a local file folder. Apple and Android block syncing from files. Please upload this file to a free web host (like tiiny.host) to enable Auto-Sync.</span>
+    </div>
+
+    <!-- ADD EXPENSE -->
+    <div class="card">
+        <h2>Add Expense <span id="syncIndicator" class="sync-badge sync-offline">🔴 Offline</span></h2>
+        <div class="input-group">
+            <input type="date" id="dateInput" onchange="updateDashboard()">
+            <input type="number" id="amount" placeholder="$0.00" step="0.01">
+        </div>
+        <div class="input-group">
+            <select id="category"></select>
+            <select id="method"></select>
+        </div>
+        <button id="addBtn" onclick="addExpense()">Add Expense</button>
+    </div>
+
+    <!-- DASHBOARD -->
+    <div class="card">
+        <h2>Spend on: <span id="dashboardDateLabel" style="color: var(--primary);">Today</span></h2>
+        <div class="daily-total" id="dailyTotal">$0.00</div>
+        <h3 style="font-size: 1rem; margin-bottom: 5px; border-bottom: 1px solid var(--border); padding-bottom: 5px;">History for this Date</h3>
+        <ul class="expense-list" id="historyList"></ul>
+    </div>
+
+    <!-- ANALYTICS -->
+    <div class="card">
+        <h2>Analytics <button class="secondary" style="padding: 5px 10px; font-size: 0.8rem;" onclick="toggleSettings()">⚙️ Sync Settings</button></h2>
+        <div class="tabs">
+            <div class="tab active" onclick="setChartType('time', this)">Time</div>
+            <div class="tab" onclick="setChartType('category', this)">Category</div>
+            <div class="tab" onclick="setChartType('method', this)">Method</div>
+        </div>
+        <div class="tabs">
+            <div class="tab active" onclick="setTimeframe('daily', this)">Daily</div>
+            <div class="tab" onclick="setTimeframe('weekly', this)">Weekly</div>
+            <div class="tab" onclick="setTimeframe('monthly', this)">Monthly</div>
+            <div class="tab" onclick="setTimeframe('yearly', this)">Yearly</div>
+        </div>
+        <div class="chart-container"><canvas id="myChart"></canvas></div>
+    </div>
+
+    <!-- SETTINGS & SYNC -->
+    <div class="card settings" id="settingsPanel">
+        <div class="cloud-box">
+            <h3 style="margin-top:0;">🔄 Auto-Sync Devices</h3>
+            <p style="font-size: 0.85rem; color: #4b5563;">Generate a code on your main device, then enter it on your other devices. They will sync automatically in the background!</p>
+            <p style="font-weight: bold;">Your Sync Code: <br><span id="syncCodeDisplay" style="color: var(--primary); word-break: break-all;">None</span></p>
+            
+            <div class="input-group">
+                <input type="text" id="syncInput" placeholder="Paste code here...">
+                <button onclick="linkDevice()" style="flex: 1;" id="linkBtn">Link</button>
+            </div>
+            <button class="secondary" onclick="generateCode()" id="genBtn" style="margin-top: 5px;">Generate New Code</button>
+        </div>
+
+        <h3>Manage Categories & Methods</h3>
+        <div class="input-group">
+            <input type="text" id="newCategory" placeholder="New Category">
+            <button class="secondary" onclick="addOption('categories', 'newCategory')">Add</button>
+        </div>
+        <div class="input-group">
+            <input type="text" id="newMethod" placeholder="New Method">
+            <button class="secondary" onclick="addOption('methods', 'newMethod')">Add</button>
+        </div>
+        <button class="secondary" style="background: var(--danger); margin-top:20px;" onclick="clearAllData()">⚠️ Delete All Data</button>
+    </div>
+</div>
+
+<script>
+    Chart.register(ChartDataLabels);
+
+    // --- STATE ---
+    let localData = {
+        expenses: JSON.parse(localStorage.getItem('expenses')) || [],
+        categories: JSON.parse(localStorage.getItem('categories')) || ['Food', 'Transport', 'Entertainment', 'Groceries', 'Bills'],
+        methods: JSON.parse(localStorage.getItem('methods')) || ['DBS PayNow', 'Credit Card', 'Cash']
+    };
+    
+    let syncData = JSON.parse(localStorage.getItem('syncData')) || null; // Stores { id, token }
+    let chartInstance = null;
+    let currentChartType = 'time'; 
+    let currentTimeframe = 'daily';
+    let isPolling = false;
+
+    // --- INIT ---
+    function init() {
+        if (window.location.protocol === 'file:') {
+            document.getElementById('localWarning').style.display = 'block';
+        }
+
+        document.getElementById('dateInput').value = getLocalToday();
+        refreshUI();
+
+        if (syncData && syncData.id) {
+            startAutoSync();
+        }
+    }
+
+    function getLocalToday() {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+
+    function refreshUI() {
+        document.getElementById('category').innerHTML = localData.categories.map(c => `<option value="${c}">${c}</option>`).join('');
+        document.getElementById('method').innerHTML = localData.methods.map(m => `<option value="${m}">${m}</option>`).join('');
+        
+        if (syncData) {
+            document.getElementById('syncCodeDisplay').innerText = `${syncData.id}-${syncData.token}`;
+            document.getElementById('syncIndicator').className = "sync-badge sync-online";
+            document.getElementById('syncIndicator').innerText = "🟢 Live Syncing";
+        }
+        
+        updateDashboard();
+        renderChart();
+    }
+
+    // --- EXPENSE LOGIC (WITH CLOUD TRUTH) ---
+    async function addExpense() {
+        const amount = parseFloat(document.getElementById('amount').value);
+        const date = document.getElementById('dateInput').value;
+        if (!amount || amount <= 0) return alert('Please enter a valid amount');
+        if (!date) return alert('Please select a date');
+
+        const expense = {
+            id: Date.now(), 
+            date: date,
+            amount: amount,
+            category: document.getElementById('category').value,
+            method: document.getElementById('method').value
+        };
+
+        const btn = document.getElementById('addBtn');
+        btn.disabled = true;
+        btn.innerText = "Syncing...";
+
+        // If online, fetch absolute latest first, append, then push
+        if (syncData) {
+            try {
+                const cloudRes = await fetch(`https://api.myjson.online/v1/records/${syncData.id}`);
+                if (cloudRes.ok) {
+                    const cloudJSON = await cloudRes.json();
+                    if (cloudJSON.data && cloudJSON.data.expenses) {
+                        localData = cloudJSON.data; // Sync to current cloud
+                    }
+                }
+                
+                localData.expenses.push(expense);
+                await pushToCloud();
+                
+            } catch (e) {
+                // If offline, just save locally
+                localData.expenses.push(expense);
+            }
+        } else {
+            localData.expenses.push(expense);
+        }
+
+        saveLocally();
+        refreshUI();
+        document.getElementById('amount').value = ''; 
+        btn.disabled = false;
+        btn.innerText = "Add Expense";
+    }
+
+    async function deleteExpense(id) {
+        if(!confirm("Delete this expense?")) return;
+        
+        localData.expenses = localData.expenses.filter(e => e.id !== id);
+        saveLocally();
+        refreshUI();
+
+        if (syncData) {
+            try {
+                // Fetch latest, remove the item, push back
+                const cloudRes = await fetch(`https://api.myjson.online/v1/records/${syncData.id}`);
+                if (cloudRes.ok) {
+                    const cloudJSON = await cloudRes.json();
+                    cloudJSON.data.expenses = cloudJSON.data.expenses.filter(e => e.id !== id);
+                    localData.expenses = cloudJSON.data.expenses;
+                    await pushToCloud();
+                }
+            } catch (e) { console.log("Failed to sync deletion instantly"); }
+        }
+    }
+
+    function saveLocally() {
+        localStorage.setItem('expenses', JSON.stringify(localData.expenses));
+        localStorage.setItem('categories', JSON.stringify(localData.categories));
+        localStorage.setItem('methods', JSON.stringify(localData.methods));
+    }
+
+    // --- AUTO-SYNC MAGIC (MyJSON Online API) ---
+    async function pushToCloud() {
+        await fetch(`https://api.myjson.online/v1/records/${syncData.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', 'x-collection-access-token': syncData.token },
+            body: JSON.stringify({ data: localData })
+        });
+    }
+
+    function startAutoSync() {
+        if(isPolling) return;
+        isPolling = true;
+        
+        // Poll the database every 4 seconds silently in the background
+        setInterval(async () => {
+            if(!syncData) return;
+            try {
+                const res = await fetch(`https://api.myjson.online/v1/records/${syncData.id}`);
+                if (res.ok) {
+                    const cloudData = await res.json();
+                    
+                    // If the cloud has different data, update the UI automatically
+                    if (JSON.stringify(cloudData.data) !== JSON.stringify(localData)) {
+                        localData = cloudData.data;
+                        saveLocally();
+                        refreshUI();
+                    }
+                }
+            } catch (e) {
+                // Network silently failed
+            }
+        }, 4000);
+    }
+
+    async function generateCode() {
+        const btn = document.getElementById('genBtn');
+        btn.innerText = "Generating...";
+        btn.disabled = true;
+
+        try {
+            const res = await fetch('https://api.myjson.online/v1/records', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ data: localData })
+            });
+            const result = await res.json();
+            
+            syncData = { id: result.id, token: result.token };
+            localStorage.setItem('syncData', JSON.stringify(syncData));
+            
+            startAutoSync();
+            refreshUI();
+            alert("Code Generated! Copy the code shown in the Settings menu and paste it on your other device.");
+        } catch (e) {
+            alert("Network Error. Cannot generate code.");
+        }
+        btn.innerText = "Generate New Code";
+        btn.disabled = false;
+    }
+
+    async function linkDevice() {
+        const input = document.getElementById('syncInput').value.trim();
+        if(!input || !input.includes('-')) return alert("Please enter a valid code format (e.g., xxxxx-yyyyy)");
+        
+        const btn = document.getElementById('linkBtn');
+        btn.innerText = "Linking...";
+        btn.disabled = true;
+
+        const parts = input.split('-');
+        const tempId = parts[0];
+        const tempToken = parts[1];
+
+        try {
+            const res = await fetch(`https://api.myjson.online/v1/records/${tempId}`);
+            if (!res.ok) throw new Error("Invalid Code");
+            
+            const cloudData = await res.json();
+            localData = cloudData.data; // Overwrite local with cloud data
+            
+            syncData = { id: tempId, token: tempToken };
+            localStorage.setItem('syncData', JSON.stringify(syncData));
+            
+            saveLocally();
+            startAutoSync();
+            refreshUI();
+            document.getElementById('syncInput').value = '';
+            alert("🎉 Devices Successfully Linked! They are now syncing automatically.");
+        } catch (e) {
+            alert("Invalid Code or Network Error.");
+        }
+        
+        btn.innerText = "Link";
+        btn.disabled = false;
+    }
+
+    // --- DASHBOARD & CHARTS ---
+    function updateDashboard() {
+        const selectedDateStr = document.getElementById('dateInput').value;
+        if (selectedDateStr === getLocalToday()) document.getElementById('dashboardDateLabel').innerText = "Today";
+        else {
+            const parts = selectedDateStr.split('-');
+            document.getElementById('dashboardDateLabel').innerText = new Date(parts[0], parts[1]-1, parts[2]).toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'});
+        }
+
+        const dailyExpenses = localData.expenses.filter(e => e.date === selectedDateStr).sort((a, b) => b.id - a.id);
+        const total = dailyExpenses.reduce((sum, e) => sum + e.amount, 0);
+        document.getElementById('dailyTotal').innerText = `$${total.toFixed(2)}`;
+
+        const list = document.getElementById('historyList');
+        if (dailyExpenses.length === 0) list.innerHTML = "<p style='text-align:center; color:#6b7280; font-size:0.9rem;'>No expenses logged for this date.</p>";
+        else {
+            list.innerHTML = dailyExpenses.map(e => `
+                <li class="expense-item">
+                    <div class="expense-details">
+                        <strong>${e.category}</strong>
+                        <span>${e.method}</span>
+                    </div>
+                    <div class="expense-right">
+                        <div class="expense-amount">$${e.amount.toFixed(2)}</div>
+                        <button class="danger-text" onclick="deleteExpense(${e.id})">❌</button>
+                    </div>
+                </li>
+            `).join('');
+        }
+    }
+
+    function setChartType(type, element) {
+        currentChartType = type;
+        element.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        element.classList.add('active');
+        renderChart();
+    }
+
+    function setTimeframe(tf, element) {
+        currentTimeframe = tf;
+        element.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        element.classList.add('active');
+        renderChart();
+    }
+
+    function getChartData() {
+        let aggregated = {};
+        localData.expenses.forEach(e => {
+            const parts = e.date.split('-');
+            const d = new Date(parts[0], parts[1]-1, parts[2]); 
+            let key = '';
+            
+            if (currentChartType === 'time') {
+                if (currentTimeframe === 'daily') key = e.date;
+                if (currentTimeframe === 'weekly') {
+                    const startOfYear = new Date(d.getFullYear(), 0, 1);
+                    const days = Math.floor((d - startOfYear) / (24 * 60 * 60 * 1000));
+                    key = `${d.getFullYear()} Wk ${Math.ceil((days + startOfYear.getDay() + 1) / 7)}`;
+                }
+                if (currentTimeframe === 'monthly') {
+                    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                    key = `${months[d.getMonth()]} ${d.getFullYear()}`;
+                }
+                if (currentTimeframe === 'yearly') key = d.getFullYear().toString();
+            } else if (currentChartType === 'category') key = e.category;
+            else if (currentChartType === 'method') key = e.method;
+
+            aggregated[key] = (aggregated[key] || 0) + e.amount;
+        });
+
+        let labels = Object.keys(aggregated);
+        if (currentChartType === 'time') labels.sort(); 
+        let data = labels.map(l => aggregated[l]);
+        return { labels, data };
+    }
+
+    function renderChart() {
+        const ctx = document.getElementById('myChart').getContext('2d');
+        if (chartInstance) chartInstance.destroy();
+        const cd = getChartData();
+        const isPie = currentChartType !== 'time';
+
+        chartInstance = new Chart(ctx, {
+            type: isPie ? 'doughnut' : 'bar',
+            data: {
+                labels: cd.labels,
+                datasets: [{
+                    label: 'Amount ($)', data: cd.data,
+                    backgroundColor: ['#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#10b981', '#34d399', '#6ee7b7', '#a7f3d0'],
+                    borderRadius: isPie ? 0 : 4
+                }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                layout: { padding: { top: isPie ? 0 : 25 } },
+                plugins: { 
+                    legend: { display: isPie, position: 'right' },
+                    datalabels: {
+                        color: isPie ? '#ffffff' : '#1f2937',
+                        anchor: isPie ? 'center' : 'end', align: isPie ? 'center' : 'end',
+                        font: { weight: 'bold', size: 12 },
+                        formatter: v => v === 0 ? '' : '$' + Math.round(v).toLocaleString()
+                    }
+                },
+                scales: { x: { display: !isPie }, y: { display: !isPie, beginAtZero: true } }
+            }
+        });
+    }
+
+    async function addOption(type, inputId) {
+        const val = document.getElementById(inputId).value.trim();
+        if (!val) return;
+        if (type === 'categories' && !localData.categories.includes(val)) localData.categories.push(val);
+        if (type === 'methods' && !localData.methods.includes(val)) localData.methods.push(val);
+        
+        document.getElementById(inputId).value = '';
+        saveLocally();
+        refreshUI();
+        if(syncData) await pushToCloud();
+    }
+
+    function toggleSettings() { document.getElementById('settingsPanel').classList.toggle('active'); }
+
+    function clearAllData() {
+        if(confirm("Are you sure you want to completely delete all data?")) {
+            localStorage.clear();
+            location.reload();
+        }
+    }
+
+    init();
+</script>
+</body>
+</html>
