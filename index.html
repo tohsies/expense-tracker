@@ -132,14 +132,16 @@
 <script>
     Chart.register(ChartDataLabels);
 
-    // --- STATE ---
+    // --- STATE & ARCHITECTURE ---
+    // Using a "lastModified" timestamp prevents all double-counting and overwriting bugs.
     let localData = {
+        lastModified: Date.now(),
         expenses: JSON.parse(localStorage.getItem('expenses')) || [],
         categories: JSON.parse(localStorage.getItem('categories')) || ['Food', 'Transport', 'Entertainment', 'Groceries', 'Bills'],
         methods: JSON.parse(localStorage.getItem('methods')) || ['DBS PayNow', 'Credit Card', 'Cash']
     };
     
-    // Clean up any broken "undefined" codes from previous versions
+    // Clean up broken codes
     let syncId = localStorage.getItem('syncId'); 
     if (syncId === 'undefined' || syncId === 'null') syncId = null;
 
@@ -149,7 +151,7 @@
     let isPolling = false;
 
     // --- DATABASE API ENDPOINT ---
-    const DB_URL = "https://api.restful-api.dev/objects";
+    const DB_URL = "https://api.npoint.io";
 
     // --- INIT ---
     function init() {
@@ -196,8 +198,8 @@
         renderChart();
     }
 
-    // --- EXPENSE LOGIC ---
-    async function addExpense() {
+    // --- EXPENSE LOGIC (LOCAL FIRST) ---
+    function addExpense() {
         const amount = parseFloat(document.getElementById('amount').value);
         const date = document.getElementById('dateInput').value;
         if (!amount || amount <= 0) return alert('Please enter a valid amount');
@@ -211,57 +213,31 @@
             method: document.getElementById('method').value
         };
 
-        const btn = document.getElementById('addBtn');
-        btn.disabled = true;
-        btn.innerText = "Saving...";
-
-        if (syncId) {
-            try {
-                // Fetch latest so we don't accidentally overwrite the other device
-                const cloudRes = await fetch(`${DB_URL}/${syncId}`);
-                if (cloudRes.ok) {
-                    const cloudJSON = await cloudRes.json();
-                    if (cloudJSON && cloudJSON.data) localData = cloudJSON.data;
-                }
-                
-                localData.expenses.push(expense);
-                await pushToCloud();
-                setSyncStatus('online');
-            } catch (e) {
-                // Network glitch - save locally anyway
-                localData.expenses.push(expense);
-                setSyncStatus('error');
-            }
-        } else {
-            localData.expenses.push(expense);
-        }
-
+        // 1. Update Local State & Timestamp instantly
+        localData.expenses.push(expense);
+        localData.lastModified = Date.now();
+        
         saveLocally();
         refreshUI();
         document.getElementById('amount').value = ''; 
-        btn.disabled = false;
-        btn.innerText = "Add Expense";
+
+        // 2. Fire and forget to Cloud
+        if (syncId) {
+            pushToCloud();
+        }
     }
 
-    async function deleteExpense(id) {
+    function deleteExpense(id) {
         if(!confirm("Delete this expense?")) return;
         
         localData.expenses = localData.expenses.filter(e => e.id !== id);
+        localData.lastModified = Date.now();
+        
         saveLocally();
         refreshUI();
 
         if (syncId) {
-            try {
-                const cloudRes = await fetch(`${DB_URL}/${syncId}`);
-                if (cloudRes.ok) {
-                    const cloudJSON = await cloudRes.json();
-                    if (cloudJSON && cloudJSON.data) {
-                        cloudJSON.data.expenses = cloudJSON.data.expenses.filter(e => e.id !== id);
-                        localData = cloudJSON.data;
-                    }
-                    await pushToCloud();
-                }
-            } catch (e) { setSyncStatus('error'); }
+            pushToCloud();
         }
     }
 
@@ -271,37 +247,46 @@
         localStorage.setItem('methods', JSON.stringify(localData.methods));
     }
 
-    // --- AUTO-SYNC MAGIC (restful-api.dev) ---
+    // --- SELF HEALING AUTO-SYNC MAGIC ---
     async function pushToCloud() {
-        const res = await fetch(`${DB_URL}/${syncId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: "ExpenseTrackerSync", data: localData })
-        });
-        if (!res.ok) throw new Error("Failed to push to cloud");
+        try {
+            const res = await fetch(`${DB_URL}/${syncId}`, {
+                method: 'POST', // nPoint uses POST to update
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(localData)
+            });
+            if (res.ok) setSyncStatus('online');
+            else throw new Error("Sync Failed");
+        } catch (e) {
+            setSyncStatus('error');
+        }
     }
 
     function startAutoSync() {
         if(isPolling) return;
         isPolling = true;
         
-        // Poll the database every 4 seconds silently
         setInterval(async () => {
             if(!syncId) return;
             try {
                 const res = await fetch(`${DB_URL}/${syncId}`);
                 if (res.ok) {
-                    const cloudObj = await res.json();
+                    const cloudData = await res.json();
                     
-                    if (cloudObj && cloudObj.data) {
-                        if (JSON.stringify(cloudObj.data) !== JSON.stringify(localData)) {
-                            localData = cloudObj.data;
+                    // Self Healing Logic:
+                    if (cloudData && cloudData.lastModified) {
+                        if (cloudData.lastModified > localData.lastModified) {
+                            // Cloud is newer, pull it down
+                            localData = cloudData;
                             saveLocally();
                             refreshUI();
+                        } else if (localData.lastModified > cloudData.lastModified) {
+                            // Local is newer (a previous upload failed), push it up
+                            pushToCloud();
                         }
                     }
                     setSyncStatus('online');
-                } else if (res.status === 404) {
+                } else {
                     setSyncStatus('error');
                 }
             } catch (e) {
@@ -316,18 +301,19 @@
         btn.disabled = true;
 
         try {
-            // Generate unique database object
+            // Guarantee fresh timestamp
+            localData.lastModified = Date.now();
+
             const res = await fetch(DB_URL, { 
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: "ExpenseTrackerSync", data: localData })
+                body: JSON.stringify(localData)
             });
             
-            if (!res.ok) throw new Error(`Server returned ${res.status}`);
+            if (!res.ok) throw new Error("Network blocked");
             
             const result = await res.json();
-            
-            if (!result.id) throw new Error("Database did not return an ID");
+            if (!result.id) throw new Error("No ID generated");
 
             syncId = result.id;
             localStorage.setItem('syncId', syncId);
@@ -336,7 +322,7 @@
             refreshUI();
             alert("Code Generated Successfully!\n\nCopy the code shown in the Settings menu and paste it on your other device.");
         } catch (e) {
-            alert("Network Error: Could not generate code. \nDetails: " + e.message);
+            alert("Network Error: Could not generate code. Check connection.");
         }
         
         btn.innerText = "Generate New Sync Code";
@@ -353,13 +339,13 @@
 
         try {
             const res = await fetch(`${DB_URL}/${input}`);
-            if (!res.ok) throw new Error("Code not found in database");
+            if (!res.ok) throw new Error("Invalid Code");
             
-            const cloudObj = await res.json();
-            if(cloudObj && cloudObj.data) {
-                localData = cloudObj.data;
+            const cloudData = await res.json();
+            if(cloudData && cloudData.lastModified) {
+                localData = cloudData; // Sync successful
             } else {
-                throw new Error("No data found inside code");
+                throw new Error("Data empty");
             }
             
             syncId = input;
@@ -371,7 +357,7 @@
             document.getElementById('syncInput').value = '';
             alert("🎉 Devices Successfully Linked! They are now syncing automatically.");
         } catch (e) {
-            alert("Error Linking Devices: " + e.message);
+            alert("Error Linking Devices. Ensure the code is correct.");
             document.getElementById('syncInput').value = '';
         }
         
@@ -488,16 +474,17 @@
         });
     }
 
-    async function addOption(type, inputId) {
+    function addOption(type, inputId) {
         const val = document.getElementById(inputId).value.trim();
         if (!val) return;
         if (type === 'categories' && !localData.categories.includes(val)) localData.categories.push(val);
         if (type === 'methods' && !localData.methods.includes(val)) localData.methods.push(val);
         
+        localData.lastModified = Date.now();
         document.getElementById(inputId).value = '';
         saveLocally();
         refreshUI();
-        if(syncId) await pushToCloud();
+        if(syncId) pushToCloud();
     }
 
     function toggleSettings() { document.getElementById('settingsPanel').classList.toggle('active'); }
