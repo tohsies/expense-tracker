@@ -54,6 +54,7 @@
         .sync-badge { font-size: 0.8rem; padding: 4px 8px; border-radius: 12px; font-weight: bold; }
         .sync-offline { background: #fee2e2; color: #dc2626; }
         .sync-online { background: #d1fae5; color: #059669; }
+        .sync-error { background: #fef08a; color: #854d0e; }
     </style>
 </head>
 <body>
@@ -103,7 +104,10 @@
         <div class="cloud-box">
             <h3 style="margin-top:0;">🔄 Auto-Sync Devices</h3>
             <p style="font-size: 0.85rem; color: #4b5563;">Generate a code on your main device, then enter it on your other devices. They will sync automatically in the background!</p>
-            <p style="font-size: 1.1rem; font-weight: bold;">Your Sync Code: <br><span id="syncCodeDisplay" style="color: var(--primary); letter-spacing: 1px;">None</span></p>
+            <div style="background: white; padding: 10px; border-radius: 6px; margin-bottom: 10px; border: 1px solid var(--border);">
+                <span style="font-weight: bold;">Your Sync Code: </span><br>
+                <span id="syncCodeDisplay" style="color: var(--primary); font-family: monospace; font-size: 1.1rem; word-break: break-all;">None</span>
+            </div>
             
             <div class="input-group">
                 <input type="text" id="syncInput" placeholder="Paste code here...">
@@ -135,11 +139,17 @@
         methods: JSON.parse(localStorage.getItem('methods')) || ['DBS PayNow', 'Credit Card', 'Cash']
     };
     
-    let syncId = localStorage.getItem('syncId') || null; 
+    // Clean up any broken "undefined" codes from previous versions
+    let syncId = localStorage.getItem('syncId'); 
+    if (syncId === 'undefined' || syncId === 'null') syncId = null;
+
     let chartInstance = null;
     let currentChartType = 'time'; 
     let currentTimeframe = 'daily';
     let isPolling = false;
+
+    // --- DATABASE API ENDPOINT ---
+    const DB_URL = "https://api.restful-api.dev/objects";
 
     // --- INIT ---
     function init() {
@@ -156,14 +166,30 @@
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     }
 
+    function setSyncStatus(status) {
+        const indicator = document.getElementById('syncIndicator');
+        if (status === 'online') {
+            indicator.className = "sync-badge sync-online";
+            indicator.innerText = "🟢 Live Syncing";
+        } else if (status === 'offline') {
+            indicator.className = "sync-badge sync-offline";
+            indicator.innerText = "🔴 Offline";
+        } else if (status === 'error') {
+            indicator.className = "sync-badge sync-error";
+            indicator.innerText = "⚠️ Sync Error";
+        }
+    }
+
     function refreshUI() {
         document.getElementById('category').innerHTML = localData.categories.map(c => `<option value="${c}">${c}</option>`).join('');
         document.getElementById('method').innerHTML = localData.methods.map(m => `<option value="${m}">${m}</option>`).join('');
         
         if (syncId) {
             document.getElementById('syncCodeDisplay').innerText = syncId;
-            document.getElementById('syncIndicator').className = "sync-badge sync-online";
-            document.getElementById('syncIndicator').innerText = "🟢 Live Syncing";
+            setSyncStatus('online');
+        } else {
+            document.getElementById('syncCodeDisplay').innerText = "None";
+            setSyncStatus('offline');
         }
         
         updateDashboard();
@@ -187,22 +213,24 @@
 
         const btn = document.getElementById('addBtn');
         btn.disabled = true;
-        btn.innerText = "Syncing...";
+        btn.innerText = "Saving...";
 
         if (syncId) {
             try {
-                // Fetch absolute latest to prevent overwriting other device's quick inputs
-                const cloudRes = await fetch(`https://kvdb.io/${syncId}/data`);
+                // Fetch latest so we don't accidentally overwrite the other device
+                const cloudRes = await fetch(`${DB_URL}/${syncId}`);
                 if (cloudRes.ok) {
                     const cloudJSON = await cloudRes.json();
-                    if (cloudJSON && cloudJSON.expenses) localData = cloudJSON;
+                    if (cloudJSON && cloudJSON.data) localData = cloudJSON.data;
                 }
                 
                 localData.expenses.push(expense);
                 await pushToCloud();
+                setSyncStatus('online');
             } catch (e) {
-                // Fallback offline save
+                // Network glitch - save locally anyway
                 localData.expenses.push(expense);
+                setSyncStatus('error');
             }
         } else {
             localData.expenses.push(expense);
@@ -224,14 +252,16 @@
 
         if (syncId) {
             try {
-                const cloudRes = await fetch(`https://kvdb.io/${syncId}/data`);
+                const cloudRes = await fetch(`${DB_URL}/${syncId}`);
                 if (cloudRes.ok) {
                     const cloudJSON = await cloudRes.json();
-                    cloudJSON.expenses = cloudJSON.expenses.filter(e => e.id !== id);
-                    localData.expenses = cloudJSON.expenses;
+                    if (cloudJSON && cloudJSON.data) {
+                        cloudJSON.data.expenses = cloudJSON.data.expenses.filter(e => e.id !== id);
+                        localData = cloudJSON.data;
+                    }
                     await pushToCloud();
                 }
-            } catch (e) { console.log("Failed to sync deletion instantly"); }
+            } catch (e) { setSyncStatus('error'); }
         }
     }
 
@@ -241,13 +271,14 @@
         localStorage.setItem('methods', JSON.stringify(localData.methods));
     }
 
-    // --- AUTO-SYNC MAGIC (KVDB.io) ---
+    // --- AUTO-SYNC MAGIC (restful-api.dev) ---
     async function pushToCloud() {
-        await fetch(`https://kvdb.io/${syncId}/data`, {
+        const res = await fetch(`${DB_URL}/${syncId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(localData)
+            body: JSON.stringify({ name: "ExpenseTrackerSync", data: localData })
         });
+        if (!res.ok) throw new Error("Failed to push to cloud");
     }
 
     function startAutoSync() {
@@ -258,15 +289,20 @@
         setInterval(async () => {
             if(!syncId) return;
             try {
-                const res = await fetch(`https://kvdb.io/${syncId}/data`);
+                const res = await fetch(`${DB_URL}/${syncId}`);
                 if (res.ok) {
-                    const cloudData = await res.json();
+                    const cloudObj = await res.json();
                     
-                    if (JSON.stringify(cloudData) !== JSON.stringify(localData)) {
-                        localData = cloudData;
-                        saveLocally();
-                        refreshUI();
+                    if (cloudObj && cloudObj.data) {
+                        if (JSON.stringify(cloudObj.data) !== JSON.stringify(localData)) {
+                            localData = cloudObj.data;
+                            saveLocally();
+                            refreshUI();
+                        }
                     }
+                    setSyncStatus('online');
+                } else if (res.status === 404) {
+                    setSyncStatus('error');
                 }
             } catch (e) {
                 // Ignore silent background network errors
@@ -280,192 +316,29 @@
         btn.disabled = true;
 
         try {
-            // Generate unique bucket ID
-            const res = await fetch('https://kvdb.io/', { method: 'POST' });
-            if (!res.ok) throw new Error();
+            // Generate unique database object
+            const res = await fetch(DB_URL, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: "ExpenseTrackerSync", data: localData })
+            });
             
-            const newId = (await res.text()).trim();
-            syncId = newId;
+            if (!res.ok) throw new Error(`Server returned ${res.status}`);
+            
+            const result = await res.json();
+            
+            if (!result.id) throw new Error("Database did not return an ID");
+
+            syncId = result.id;
             localStorage.setItem('syncId', syncId);
-            
-            // Push initial data to new bucket
-            await pushToCloud();
             
             startAutoSync();
             refreshUI();
-            alert("Code Generated!\n\nCopy the code shown in the Settings menu and paste it on your other device.");
+            alert("Code Generated Successfully!\n\nCopy the code shown in the Settings menu and paste it on your other device.");
         } catch (e) {
-            alert("Network Error. Cannot generate code.");
+            alert("Network Error: Could not generate code. \nDetails: " + e.message);
         }
+        
         btn.innerText = "Generate New Sync Code";
         btn.disabled = false;
     }
-
-    async function linkDevice() {
-        const input = document.getElementById('syncInput').value.trim();
-        if(!input) return alert("Please enter a code");
-        
-        const btn = document.getElementById('linkBtn');
-        btn.innerText = "Linking...";
-        btn.disabled = true;
-
-        try {
-            const res = await fetch(`https://kvdb.io/${input}/data`);
-            if (!res.ok) throw new Error("Invalid Code");
-            
-            const cloudData = await res.json();
-            if(cloudData && cloudData.expenses) {
-                localData = cloudData;
-            }
-            
-            syncId = input;
-            localStorage.setItem('syncId', syncId);
-            
-            saveLocally();
-            startAutoSync();
-            refreshUI();
-            document.getElementById('syncInput').value = '';
-            alert("🎉 Devices Successfully Linked! They are now syncing automatically.");
-        } catch (e) {
-            alert("Invalid Code or Network Error. Make sure you pasted it correctly.");
-            document.getElementById('syncInput').value = '';
-        }
-        
-        btn.innerText = "Link";
-        btn.disabled = false;
-    }
-
-    // --- DASHBOARD & CHARTS ---
-    function updateDashboard() {
-        const selectedDateStr = document.getElementById('dateInput').value;
-        if (selectedDateStr === getLocalToday()) document.getElementById('dashboardDateLabel').innerText = "Today";
-        else {
-            const parts = selectedDateStr.split('-');
-            document.getElementById('dashboardDateLabel').innerText = new Date(parts[0], parts[1]-1, parts[2]).toLocaleDateString(undefined, {month: 'short', day: 'numeric', year: 'numeric'});
-        }
-
-        const dailyExpenses = localData.expenses.filter(e => e.date === selectedDateStr).sort((a, b) => b.id - a.id);
-        const total = dailyExpenses.reduce((sum, e) => sum + e.amount, 0);
-        document.getElementById('dailyTotal').innerText = `$${total.toFixed(2)}`;
-
-        const list = document.getElementById('historyList');
-        if (dailyExpenses.length === 0) list.innerHTML = "<p style='text-align:center; color:#6b7280; font-size:0.9rem;'>No expenses logged for this date.</p>";
-        else {
-            list.innerHTML = dailyExpenses.map(e => `
-                <li class="expense-item">
-                    <div class="expense-details">
-                        <strong>${e.category}</strong>
-                        <span>${e.method}</span>
-                    </div>
-                    <div class="expense-right">
-                        <div class="expense-amount">$${e.amount.toFixed(2)}</div>
-                        <button class="danger-text" onclick="deleteExpense(${e.id})">❌</button>
-                    </div>
-                </li>
-            `).join('');
-        }
-    }
-
-    function setChartType(type, element) {
-        currentChartType = type;
-        element.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        element.classList.add('active');
-        renderChart();
-    }
-
-    function setTimeframe(tf, element) {
-        currentTimeframe = tf;
-        element.parentElement.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-        element.classList.add('active');
-        renderChart();
-    }
-
-    function getChartData() {
-        let aggregated = {};
-        localData.expenses.forEach(e => {
-            const parts = e.date.split('-');
-            const d = new Date(parts[0], parts[1]-1, parts[2]); 
-            let key = '';
-            
-            if (currentChartType === 'time') {
-                if (currentTimeframe === 'daily') key = e.date;
-                if (currentTimeframe === 'weekly') {
-                    const startOfYear = new Date(d.getFullYear(), 0, 1);
-                    const days = Math.floor((d - startOfYear) / (24 * 60 * 60 * 1000));
-                    key = `${d.getFullYear()} Wk ${Math.ceil((days + startOfYear.getDay() + 1) / 7)}`;
-                }
-                if (currentTimeframe === 'monthly') {
-                    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                    key = `${months[d.getMonth()]} ${d.getFullYear()}`;
-                }
-                if (currentTimeframe === 'yearly') key = d.getFullYear().toString();
-            } else if (currentChartType === 'category') key = e.category;
-            else if (currentChartType === 'method') key = e.method;
-
-            aggregated[key] = (aggregated[key] || 0) + e.amount;
-        });
-
-        let labels = Object.keys(aggregated);
-        if (currentChartType === 'time') labels.sort(); 
-        let data = labels.map(l => aggregated[l]);
-        return { labels, data };
-    }
-
-    function renderChart() {
-        const ctx = document.getElementById('myChart').getContext('2d');
-        if (chartInstance) chartInstance.destroy();
-        const cd = getChartData();
-        const isPie = currentChartType !== 'time';
-
-        chartInstance = new Chart(ctx, {
-            type: isPie ? 'doughnut' : 'bar',
-            data: {
-                labels: cd.labels,
-                datasets: [{
-                    label: 'Amount ($)', data: cd.data,
-                    backgroundColor: ['#2563eb', '#3b82f6', '#60a5fa', '#93c5fd', '#bfdbfe', '#10b981', '#34d399', '#6ee7b7', '#a7f3d0'],
-                    borderRadius: isPie ? 0 : 4
-                }]
-            },
-            options: {
-                responsive: true, maintainAspectRatio: false,
-                layout: { padding: { top: isPie ? 0 : 25 } },
-                plugins: { 
-                    legend: { display: isPie, position: 'right' },
-                    datalabels: {
-                        color: isPie ? '#ffffff' : '#1f2937',
-                        anchor: isPie ? 'center' : 'end', align: isPie ? 'center' : 'end',
-                        font: { weight: 'bold', size: 12 },
-                        formatter: v => v === 0 ? '' : '$' + Math.round(v).toLocaleString()
-                    }
-                },
-                scales: { x: { display: !isPie }, y: { display: !isPie, beginAtZero: true } }
-            }
-        });
-    }
-
-    async function addOption(type, inputId) {
-        const val = document.getElementById(inputId).value.trim();
-        if (!val) return;
-        if (type === 'categories' && !localData.categories.includes(val)) localData.categories.push(val);
-        if (type === 'methods' && !localData.methods.includes(val)) localData.methods.push(val);
-        
-        document.getElementById(inputId).value = '';
-        saveLocally();
-        refreshUI();
-        if(syncId) await pushToCloud();
-    }
-
-    function toggleSettings() { document.getElementById('settingsPanel').classList.toggle('active'); }
-
-    function clearAllData() {
-        if(confirm("Are you sure you want to completely delete all data?")) {
-            localStorage.clear();
-            location.reload();
-        }
-    }
-
-    init();
-</script>
-</body>
-</html>
