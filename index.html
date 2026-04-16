@@ -133,7 +133,7 @@
     Chart.register(ChartDataLabels);
 
     // --- STATE & ARCHITECTURE ---
-    // Using a "lastModified" timestamp prevents all double-counting and overwriting bugs.
+    // The timestamp ensures older data NEVER overwrites newer data.
     let localData = {
         lastModified: Date.now(),
         expenses: JSON.parse(localStorage.getItem('expenses')) || [],
@@ -150,8 +150,8 @@
     let currentTimeframe = 'daily';
     let isPolling = false;
 
-    // --- DATABASE API ENDPOINT ---
-    const DB_URL = "https://api.npoint.io";
+    // --- DATABASE API ENDPOINT (Stable, No Rate Limit Issues) ---
+    const DB_URL = "https://kvdb.io";
 
     // --- INIT ---
     function init() {
@@ -163,6 +163,14 @@
         }
     }
 
+    // --- SMART SYNC LOGIC (Saves Network Traffic) ---
+    // Checks database ONLY when you reopen the app or switch back to the tab
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === 'visible' && syncId) {
+            pullFromCloud();
+        }
+    });
+
     function getLocalToday() {
         const d = new Date();
         return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -172,13 +180,13 @@
         const indicator = document.getElementById('syncIndicator');
         if (status === 'online') {
             indicator.className = "sync-badge sync-online";
-            indicator.innerText = "🟢 Live Syncing";
+            indicator.innerText = "🟢 Linked & Synced";
         } else if (status === 'offline') {
             indicator.className = "sync-badge sync-offline";
             indicator.innerText = "🔴 Offline";
         } else if (status === 'error') {
             indicator.className = "sync-badge sync-error";
-            indicator.innerText = "⚠️ Sync Error";
+            indicator.innerText = "⚠️ Network Glitch";
         }
     }
 
@@ -198,7 +206,7 @@
         renderChart();
     }
 
-    // --- EXPENSE LOGIC (LOCAL FIRST) ---
+    // --- EXPENSE LOGIC (STRICT OVERWRITE) ---
     function addExpense() {
         const amount = parseFloat(document.getElementById('amount').value);
         const date = document.getElementById('dateInput').value;
@@ -213,7 +221,7 @@
             method: document.getElementById('method').value
         };
 
-        // 1. Update Local State & Timestamp instantly
+        // 1. Update Local State FIRST
         localData.expenses.push(expense);
         localData.lastModified = Date.now();
         
@@ -222,9 +230,7 @@
         document.getElementById('amount').value = ''; 
 
         // 2. Fire and forget to Cloud
-        if (syncId) {
-            pushToCloud();
-        }
+        if (syncId) pushToCloud();
     }
 
     function deleteExpense(id) {
@@ -236,9 +242,7 @@
         saveLocally();
         refreshUI();
 
-        if (syncId) {
-            pushToCloud();
-        }
+        if (syncId) pushToCloud();
     }
 
     function saveLocally() {
@@ -247,11 +251,11 @@
         localStorage.setItem('methods', JSON.stringify(localData.methods));
     }
 
-    // --- SELF HEALING AUTO-SYNC MAGIC ---
+    // --- SELF HEALING CLOUD ENGINE ---
     async function pushToCloud() {
         try {
-            const res = await fetch(`${DB_URL}/${syncId}`, {
-                method: 'POST', // nPoint uses POST to update
+            const res = await fetch(`${DB_URL}/${syncId}/app_data`, {
+                method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(localData)
             });
@@ -262,37 +266,42 @@
         }
     }
 
+    async function pullFromCloud() {
+        try {
+            const res = await fetch(`${DB_URL}/${syncId}/app_data`);
+            if (res.ok) {
+                const cloudData = await res.json();
+                
+                // Strictly overwrite. No merging. No double counting.
+                if (cloudData && cloudData.lastModified) {
+                    if (cloudData.lastModified > localData.lastModified) {
+                        localData = cloudData; // Cloud is newer
+                        saveLocally();
+                        refreshUI();
+                    } else if (localData.lastModified > cloudData.lastModified) {
+                        pushToCloud(); // Local is newer
+                    }
+                }
+                setSyncStatus('online');
+            } else {
+                setSyncStatus('error');
+            }
+        } catch (e) {
+            // Ignore background network drops
+        }
+    }
+
     function startAutoSync() {
         if(isPolling) return;
         isPolling = true;
         
-        setInterval(async () => {
-            if(!syncId) return;
-            try {
-                const res = await fetch(`${DB_URL}/${syncId}`);
-                if (res.ok) {
-                    const cloudData = await res.json();
-                    
-                    // Self Healing Logic:
-                    if (cloudData && cloudData.lastModified) {
-                        if (cloudData.lastModified > localData.lastModified) {
-                            // Cloud is newer, pull it down
-                            localData = cloudData;
-                            saveLocally();
-                            refreshUI();
-                        } else if (localData.lastModified > cloudData.lastModified) {
-                            // Local is newer (a previous upload failed), push it up
-                            pushToCloud();
-                        }
-                    }
-                    setSyncStatus('online');
-                } else {
-                    setSyncStatus('error');
-                }
-            } catch (e) {
-                // Ignore silent background network errors
-            }
-        }, 4000);
+        // Initial pull
+        pullFromCloud();
+        
+        // Backup poll every 20 seconds (very low network impact)
+        setInterval(() => {
+            if(syncId) pullFromCloud();
+        }, 20000);
     }
 
     async function generateCode() {
@@ -301,28 +310,25 @@
         btn.disabled = true;
 
         try {
-            // Guarantee fresh timestamp
-            localData.lastModified = Date.now();
-
-            const res = await fetch(DB_URL, { 
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(localData)
-            });
-            
+            // Ask KVDB to generate a fresh bucket ID
+            const res = await fetch(DB_URL, { method: 'POST' });
             if (!res.ok) throw new Error("Network blocked");
             
-            const result = await res.json();
-            if (!result.id) throw new Error("No ID generated");
+            const newId = (await res.text()).trim();
+            if (!newId) throw new Error("No ID generated");
 
-            syncId = result.id;
+            syncId = newId;
             localStorage.setItem('syncId', syncId);
+            
+            // Guarantee fresh timestamp before first push
+            localData.lastModified = Date.now();
+            await pushToCloud();
             
             startAutoSync();
             refreshUI();
             alert("Code Generated Successfully!\n\nCopy the code shown in the Settings menu and paste it on your other device.");
         } catch (e) {
-            alert("Network Error: Could not generate code. Check connection.");
+            alert("Network Error: Could not generate code. Please check your internet connection.");
         }
         
         btn.innerText = "Generate New Sync Code";
@@ -338,12 +344,12 @@
         btn.disabled = true;
 
         try {
-            const res = await fetch(`${DB_URL}/${input}`);
+            const res = await fetch(`${DB_URL}/${input}/app_data`);
             if (!res.ok) throw new Error("Invalid Code");
             
             const cloudData = await res.json();
             if(cloudData && cloudData.lastModified) {
-                localData = cloudData; // Sync successful
+                localData = cloudData; // Successful pull
             } else {
                 throw new Error("Data empty");
             }
