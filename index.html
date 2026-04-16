@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Simple Expense Tracker</title>
-    <!-- Makes it look like a native app on phones -->
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     
@@ -132,8 +131,8 @@
 <script>
     Chart.register(ChartDataLabels);
 
-    // --- STATE & ARCHITECTURE ---
-    // The timestamp ensures older data NEVER overwrites newer data.
+    // --- STATE ARCHITECTURE ---
+    // The timestamp ensures older data NEVER merges with newer data. No more duplicates.
     let localData = {
         lastModified: Date.now(),
         expenses: JSON.parse(localStorage.getItem('expenses')) || [],
@@ -141,7 +140,7 @@
         methods: JSON.parse(localStorage.getItem('methods')) || ['DBS PayNow', 'Credit Card', 'Cash']
     };
     
-    // Clean up broken codes
+    // Clean up broken codes from previous versions
     let syncId = localStorage.getItem('syncId'); 
     if (syncId === 'undefined' || syncId === 'null') syncId = null;
 
@@ -150,25 +149,16 @@
     let currentTimeframe = 'daily';
     let isPolling = false;
 
-    // --- DATABASE API ENDPOINT (Stable, No Rate Limit Issues) ---
-    const DB_URL = "https://kvdb.io";
-
     // --- INIT ---
     function init() {
         document.getElementById('dateInput').value = getLocalToday();
         refreshUI();
-
-        if (syncId) {
-            startAutoSync();
-        }
+        if (syncId) startAutoSync();
     }
 
-    // --- SMART SYNC LOGIC (Saves Network Traffic) ---
-    // Checks database ONLY when you reopen the app or switch back to the tab
+    // Only hit the database when you switch tabs, saving network traffic
     document.addEventListener("visibilitychange", () => {
-        if (document.visibilityState === 'visible' && syncId) {
-            pullFromCloud();
-        }
+        if (document.visibilityState === 'visible' && syncId) pullFromCloud();
     });
 
     function getLocalToday() {
@@ -180,13 +170,13 @@
         const indicator = document.getElementById('syncIndicator');
         if (status === 'online') {
             indicator.className = "sync-badge sync-online";
-            indicator.innerText = "🟢 Linked & Synced";
+            indicator.innerText = "🟢 Synced";
         } else if (status === 'offline') {
             indicator.className = "sync-badge sync-offline";
             indicator.innerText = "🔴 Offline";
         } else if (status === 'error') {
             indicator.className = "sync-badge sync-error";
-            indicator.innerText = "⚠️ Network Glitch";
+            indicator.innerText = "⚠️ Reconnecting...";
         }
     }
 
@@ -206,7 +196,7 @@
         renderChart();
     }
 
-    // --- EXPENSE LOGIC (STRICT OVERWRITE) ---
+    // --- EXPENSE LOGIC (STRICT TIMESTAMP OVERWRITE) ---
     function addExpense() {
         const amount = parseFloat(document.getElementById('amount').value);
         const date = document.getElementById('dateInput').value;
@@ -221,7 +211,7 @@
             method: document.getElementById('method').value
         };
 
-        // 1. Update Local State FIRST
+        // Update Local State FIRST
         localData.expenses.push(expense);
         localData.lastModified = Date.now();
         
@@ -229,19 +219,16 @@
         refreshUI();
         document.getElementById('amount').value = ''; 
 
-        // 2. Fire and forget to Cloud
+        // Fire to Cloud
         if (syncId) pushToCloud();
     }
 
     function deleteExpense(id) {
         if(!confirm("Delete this expense?")) return;
-        
         localData.expenses = localData.expenses.filter(e => e.id !== id);
         localData.lastModified = Date.now();
-        
         saveLocally();
         refreshUI();
-
         if (syncId) pushToCloud();
     }
 
@@ -251,42 +238,52 @@
         localStorage.setItem('methods', JSON.stringify(localData.methods));
     }
 
-    // --- SELF HEALING CLOUD ENGINE ---
+    // --- MULTI-CLOUD ENGINE (Bypasses AdBlockers & Firewalls) ---
     async function pushToCloud() {
         try {
-            const res = await fetch(`${DB_URL}/${syncId}/app_data`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(localData)
-            });
-            if (res.ok) setSyncStatus('online');
-            else throw new Error("Sync Failed");
-        } catch (e) {
+            if (syncId.startsWith("js-")) {
+                const id = syncId.replace("js-", "");
+                const res = await fetch(`https://api.jsonstorage.net/v1/json/${id}`, {
+                    method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(localData)
+                });
+                if(!res.ok) throw new Error();
+            } else if (syncId.startsWith("np-")) {
+                const id = syncId.replace("np-", "");
+                const res = await fetch(`https://api.npoint.io/${id}`, {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(localData)
+                });
+                if(!res.ok) throw new Error();
+            }
+            setSyncStatus('online');
+        } catch(e) {
             setSyncStatus('error');
         }
     }
 
     async function pullFromCloud() {
         try {
-            const res = await fetch(`${DB_URL}/${syncId}/app_data`);
-            if (res.ok) {
-                const cloudData = await res.json();
-                
-                // Strictly overwrite. No merging. No double counting.
-                if (cloudData && cloudData.lastModified) {
-                    if (cloudData.lastModified > localData.lastModified) {
-                        localData = cloudData; // Cloud is newer
-                        saveLocally();
-                        refreshUI();
-                    } else if (localData.lastModified > cloudData.lastModified) {
-                        pushToCloud(); // Local is newer
-                    }
-                }
-                setSyncStatus('online');
-            } else {
-                setSyncStatus('error');
+            let cloudData = null;
+            if (syncId.startsWith("js-")) {
+                const id = syncId.replace("js-", "");
+                const res = await fetch(`https://api.jsonstorage.net/v1/json/${id}`);
+                if(res.ok) cloudData = await res.json();
+            } else if (syncId.startsWith("np-")) {
+                const id = syncId.replace("np-", "");
+                const res = await fetch(`https://api.npoint.io/${id}`);
+                if(res.ok) cloudData = await res.json();
             }
-        } catch (e) {
+
+            if (cloudData && cloudData.lastModified) {
+                if (cloudData.lastModified > localData.lastModified) {
+                    localData = cloudData; // Cloud is newer, overwrite local
+                    saveLocally();
+                    refreshUI();
+                } else if (localData.lastModified > cloudData.lastModified) {
+                    pushToCloud(); // Local is newer, overwrite cloud
+                }
+            }
+            setSyncStatus('online');
+        } catch(e) {
             // Ignore background network drops
         }
     }
@@ -294,11 +291,9 @@
     function startAutoSync() {
         if(isPolling) return;
         isPolling = true;
-        
-        // Initial pull
         pullFromCloud();
         
-        // Backup poll every 20 seconds (very low network impact)
+        // Backup silent poll every 20 seconds
         setInterval(() => {
             if(syncId) pullFromCloud();
         }, 20000);
@@ -310,25 +305,43 @@
         btn.disabled = true;
 
         try {
-            // Ask KVDB to generate a fresh bucket ID
-            const res = await fetch(DB_URL, { method: 'POST' });
-            if (!res.ok) throw new Error("Network blocked");
-            
-            const newId = (await res.text()).trim();
-            if (!newId) throw new Error("No ID generated");
-
-            syncId = newId;
-            localStorage.setItem('syncId', syncId);
-            
-            // Guarantee fresh timestamp before first push
             localData.lastModified = Date.now();
-            await pushToCloud();
+            let newSyncId = null;
+
+            // Database 1: JSONStorage (Extremely reliable, unblocked developer domain)
+            try {
+                const res1 = await fetch("https://api.jsonstorage.net/v1/json", {
+                    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(localData)
+                });
+                if(res1.ok) {
+                    const r1 = await res1.json();
+                    newSyncId = "js-" + r1.uri.split('/').pop();
+                }
+            } catch(e) { console.log("DB 1 Blocked by network."); }
+
+            // Database 2: nPoint (Fallback if DB 1 fails)
+            if (!newSyncId) {
+                try {
+                    const res2 = await fetch("https://api.npoint.io", {
+                        method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(localData)
+                    });
+                    if(res2.ok) {
+                        const r2 = await res2.json();
+                        newSyncId = "np-" + r2.id;
+                    }
+                } catch(e) { console.log("DB 2 Blocked by network."); }
+            }
+
+            if (!newSyncId) throw new Error("All database connections were blocked by your ad-blocker or firewall.");
+
+            syncId = newSyncId;
+            localStorage.setItem('syncId', syncId);
             
             startAutoSync();
             refreshUI();
             alert("Code Generated Successfully!\n\nCopy the code shown in the Settings menu and paste it on your other device.");
         } catch (e) {
-            alert("Network Error: Could not generate code. Please check your internet connection.");
+            alert("Error: " + e.message);
         }
         
         btn.innerText = "Generate New Sync Code";
@@ -338,18 +351,28 @@
     async function linkDevice() {
         const input = document.getElementById('syncInput').value.trim();
         if(!input) return alert("Please enter a code");
+        if(!input.startsWith("js-") && !input.startsWith("np-")) return alert("Invalid code format.");
         
         const btn = document.getElementById('linkBtn');
         btn.innerText = "Linking...";
         btn.disabled = true;
 
         try {
-            const res = await fetch(`${DB_URL}/${input}/app_data`);
-            if (!res.ok) throw new Error("Invalid Code");
-            
-            const cloudData = await res.json();
+            let cloudData = null;
+            if (input.startsWith("js-")) {
+                const id = input.replace("js-", "");
+                const res = await fetch(`https://api.jsonstorage.net/v1/json/${id}`);
+                if(res.ok) cloudData = await res.json();
+                else throw new Error("Code not found");
+            } else if (input.startsWith("np-")) {
+                const id = input.replace("np-", "");
+                const res = await fetch(`https://api.npoint.io/${id}`);
+                if(res.ok) cloudData = await res.json();
+                else throw new Error("Code not found");
+            }
+
             if(cloudData && cloudData.lastModified) {
-                localData = cloudData; // Successful pull
+                localData = cloudData; 
             } else {
                 throw new Error("Data empty");
             }
@@ -363,7 +386,7 @@
             document.getElementById('syncInput').value = '';
             alert("🎉 Devices Successfully Linked! They are now syncing automatically.");
         } catch (e) {
-            alert("Error Linking Devices. Ensure the code is correct.");
+            alert("Error Linking Devices. Ensure the code is correct. Details: " + e.message);
             document.getElementById('syncInput').value = '';
         }
         
